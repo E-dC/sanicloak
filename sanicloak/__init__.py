@@ -1,0 +1,1 @@
+from .sanicloak import KeycloakAuthenticator
