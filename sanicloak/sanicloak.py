@@ -1,25 +1,27 @@
+from typing import List, Any, Dict, Tuple, Optional, Union, Set
+from inspect import isawaitable
+from functools import wraps
+from urllib3.util import parse_url
+
 import sanic
 from sanic.log import logger
 from sanic.response import redirect
 from sanic.exceptions import InvalidUsage, Unauthorized, Forbidden, ServerError
+
 import keycloak
 from keycloak import KeycloakOpenID, KeycloakGetError
 
-from urllib3.util import parse_url
-from inspect import isawaitable
-from functools import wraps
 
 class KeycloakAuthenticator(object):
 
-
     def __init__(
-        self,
-        app,
-        keycloak_server_url,
-        client_id,
-        realm_name,
-        client_secret_key,
-        redirect_url):
+            self,
+            app: sanic.Sanic,
+            keycloak_server_url: str,
+            client_id: str,
+            realm_name: str,
+            client_secret_key: str,
+            redirect_url: str):
 
         self.steps_pre_handler = [
             self.retrieve_token,
@@ -36,12 +38,11 @@ class KeycloakAuthenticator(object):
         )
 
         self.redirect_url = redirect_url
-
         self.keycloak_login_url = self.keycloak_client.auth_url(self.redirect_url)
-
         self.app = app
 
-    async def get_token_from_code(self, request):
+    async def get_token_from_code(self, request: sanic.Request):
+
         try:
             code = request.args['code'][0]
         except KeyError:
@@ -60,7 +61,9 @@ class KeycloakAuthenticator(object):
             )
         return token
 
-    async def clear_cookies(self, response, *cookies):
+    async def clear_cookies(
+            self, response: sanic.Response, *cookies: str) -> sanic.Sanic:
+
         for cookie in cookies:
             try:
                 del(response.cookies[cookie])
@@ -69,12 +72,13 @@ class KeycloakAuthenticator(object):
         return response
 
     async def set_cookies(
-        self,
-        response,
-        httponly=True,
-        secure=False,
-        max_age=3600,
-        **cookies):
+            self,
+            response: sanic.Response,
+            httponly: bool = True,
+            secure:bool = False,
+            max_age: int = 3600,
+            **cookies: Union[bool, int]) -> sanic.Response:
+
         for cname, cvalue in cookies.items():
             response.cookies[cname] = cvalue
             response.cookies[cname]['httponly'] = httponly
@@ -84,7 +88,11 @@ class KeycloakAuthenticator(object):
         return response
 
 
-    async def add_requested_url(self, response, requested_url):
+    async def add_requested_url(
+            self,
+            response: sanic.Response,
+            requested_url: str) -> sanic.Response:
+
         if not response.cookies.get('requested_url'):
             x = parse_url(requested_url)
             requested_url = f"{x.scheme}://{x.netloc}{x.path}"
@@ -92,7 +100,8 @@ class KeycloakAuthenticator(object):
                 response, max_age=30, requested_url=requested_url)
         return response
 
-    async def check_requested_url(self, requested_url):
+    async def check_requested_url(self, requested_url: str) -> bool:
+
         x = parse_url(requested_url)
         base = f'{x.scheme}://{x.netloc}'
         try:
@@ -102,90 +111,103 @@ class KeycloakAuthenticator(object):
         except AssertionError:
             raise ServerError
 
-    async def retrieve_token(self, request):
-        logger.info('> Retrieve token (request)')
+    async def retrieve_token(
+            self,
+            request: sanic.Request) -> Union[sanic.Request, sanic.Response]:
+
+        logger.debug('> Retrieve token (request)')
 
         try:
-            logger.info(' * Checking for a valid KC token in cookies')
+            logger.debug(' * Checking for a valid KC token in cookies')
             token = {
                 'access_token': request.cookies['kc-access'],
                 'refresh_token': request.cookies['kc-refresh'],
             }
             request.ctx.token = token
-            logger.info(' * Found KC token in cookies')
+            logger.debug(' * Found KC token in cookies')
             return request
 
         except KeyError:
-            logger.info(' * No KC token found, checking for an authorization code in args')
+            logger.debug(' * No KC token found, checking for an authorization code in args')
             token = await self.get_token_from_code(request)
             if token:
-                logger.info(' * Authorization code found and exchanged for a token')
+                logger.debug(' * Authorization code found and exchanged for a token')
                 request.ctx.token = token
                 return request
 
-        logger.warning(' * Invalid or absent authorization code, redirecting to KC login')
+        logger.debug(' * Invalid or absent authorization code, redirecting to KC login')
         response = redirect(self.keycloak_login_url)
         response = await self.add_requested_url(response, request.url)
         return response
 
-    async def validate_token(self, request):
-        logger.info('> Validate token (request)')
+    async def validate_token(
+            self,
+            request: sanic.Request) -> Union[sanic.Request, sanic.Response]:
 
-        logger.info(' * Checking validity of KC access token (introspection)')
+        logger.debug('> Validate token (request)')
+
+        logger.debug(' * Checking validity of KC access token (introspection)')
         introspected = self.keycloak_client.introspect(
             request.ctx.token['access_token'])
         if introspected['active']:
-            logger.info(' * Access token is valid')
+            logger.debug(' * Access token is valid')
             request.ctx.identity_token = introspected
             return request
 
         try:
-            logger.info(' * Invalid or expired access token, attempting to refresh')
+            logger.debug(' * Invalid or expired access token, attempting to refresh')
             token = self.keycloak_client.refresh_token(request.ctx.token['refresh_token'])
 
             introspected = self.keycloak_client.introspect(request.ctx.token['access_token'])
             if introspected['active']:
-                logger.info(' * Access token refreshed')
+                logger.debug(' * Access token refreshed')
                 request.ctx.token = token
                 request.ctx.identity_token = introspected
                 return request
             raise KeycloakGetError
 
         except KeycloakGetError:
-            logger.warning(' * Refresh attempt failed')
-            logger.warning(' * Clearing KC cookies and redirecting to KC login')
+            logger.debug(' * Refresh attempt failed')
+            logger.debug(' * Clearing KC cookies and redirecting to KC login')
             response = await self.clear_cookies(
                 redirect(self.keycloak_login_url), 'kc-access', 'kc-refresh')
 
             response = await self.add_requested_url(response, request.url)
             return response
 
-    async def redirect_to_origin(self, request):
-        logger.info('> Ensure route used is the one originally requested (request)')
+    async def redirect_to_origin(
+            self,
+            request: sanic.Request) -> Union[sanic.Request, sanic.Response]:
 
-        logger.info(
+        logger.debug('> Ensure route used is the one originally requested (request)')
+
+        logger.debug(
             ' * Checking whether a redirection to originally requested url is necessary')
         requested_url = request.cookies.get('requested_url')
         if requested_url and request.url not in [requested_url, requested_url.rstrip('/')] :
             await self.check_requested_url(requested_url)
-            logger.info(f' * Redirection to {requested_url} necessary')
+            logger.debug(f' * Redirection to {requested_url} necessary')
             response = await self.clear_cookies(
                 redirect(requested_url), 'requested_url')
             response = await self.set_keycloak_cookies(request, response)
             return response
-        logger.info(' * No redirection needed')
+        logger.debug(' * No redirection needed')
         return request
 
 
-    async def set_keycloak_cookies(self, request, response):
-        logger.info('> Set Keycloak cookies (response)')
+    async def set_keycloak_cookies(
+            self,
+            request: sanic.Request,
+            response: sanic.Response) -> sanic.Response:
+
+        logger.debug('> Set Keycloak cookies (response)')
 
         try:
             assert request.ctx.protected is True
         except AttributeError:
             return response
 
-        logger.info(' * Checking whether tokens are in request context')
+        logger.debug(' * Checking whether tokens are in request context')
         try:
             context_token = request.ctx.token
             assert 'access_token' in context_token
@@ -193,21 +215,16 @@ class KeycloakAuthenticator(object):
         except:
             raise ServerError('No token found in request context')
 
-        logger.info(' * Checking if KC cookies exist: they will be set if they\'re absent or stale')
+        logger.debug(' * Checking if KC cookies exist: they will be set if they\'re absent or stale')
         cookie_access_token = request.cookies.get('kc-access')
         cookie_refresh_token = request.cookies.get('kc-refresh')
-
-        logger.debug(f"context access token:\n{context_token['access_token']}")
-        logger.debug(f"context refresh token:\n{context_token['refresh_token']}")
-        logger.debug(f"cookie access token:\n{cookie_access_token}")
-        logger.debug(f"cookie refresh token:\n{cookie_refresh_token}")
 
         if (not cookie_access_token
             or not cookie_refresh_token
             or cookie_access_token != context_token['access_token']
             or cookie_refresh_token != context_token['refresh_token']):
 
-            logger.info(' * Setting KC cookies')
+            logger.debug(' * Setting KC cookies')
             response = await self.set_cookies(
                 response,
                 **{
@@ -218,7 +235,11 @@ class KeycloakAuthenticator(object):
         return response
 
 
-    async def check_roles(self, request, roles):
+    async def check_roles(
+            self,
+            request: sanic.Request,
+            roles: Union[List, Set, Tuple]) -> sanic.Request:
+
         try:
             user_roles = set(request.ctx.identity_token['roles'])
         except KeyError:
@@ -255,4 +276,3 @@ class KeycloakAuthenticator(object):
             return decorated_function
 
         return decorator(maybe_func) if maybe_func else decorator
-
