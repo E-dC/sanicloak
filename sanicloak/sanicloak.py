@@ -1,4 +1,4 @@
-from typing import List, Any, Dict, Tuple, Optional, Union, Set
+from typing import List, Any, Dict, Tuple, Union, Set
 from inspect import isawaitable
 from functools import wraps
 from urllib3.util import parse_url
@@ -6,7 +6,7 @@ from urllib3.util import parse_url
 import sanic
 from sanic.log import logger
 from sanic.response import redirect
-from sanic.exceptions import InvalidUsage, Unauthorized, Forbidden, ServerError
+from sanic.exceptions import InvalidUsage, Forbidden, ServerError
 
 import keycloak
 from keycloak import KeycloakOpenID, KeycloakGetError
@@ -77,7 +77,7 @@ class KeycloakAuthenticator(object):
             self,
             response: sanic.HTTPResponse,
             httponly: bool = True,
-            secure:bool = False,
+            secure: bool = False,
             max_age: int = 3600,
             **cookies: Union[bool, int]) -> sanic.HTTPResponse:
         """Set cookies in response"""
@@ -89,7 +89,6 @@ class KeycloakAuthenticator(object):
             response.cookies[cname]['max-age'] = max_age
 
         return response
-
 
     async def add_requested_url(
             self,
@@ -106,14 +105,25 @@ class KeycloakAuthenticator(object):
                 response, max_age=30, requested_url=requested_url)
         return response
 
-    async def check_requested_url(self, requested_url: str) -> bool:
+    async def check_requested_url(
+            self, requested_url: str, current_request_url: str) -> bool:
         """Ensure the requested_url value does not lead outside the app routes"""
+
+        try:
+            assert requested_url is not None
+            assert requested_url not in [
+                current_request_url, current_request_url.rstrip('/')
+            ]
+        except AssertionError:
+            return False
 
         x = parse_url(requested_url)
         base = f'{x.scheme}://{x.netloc}'
         try:
             assert base == self.app.serve_location
-            assert x.path.lstrip('/') in [r.path for r in self.app.router.routes]
+            assert x.path.lstrip('/') in [
+                r.path for r in self.app.router.routes
+            ]
             return True
         except AssertionError:
             raise ServerError
@@ -136,10 +146,12 @@ class KeycloakAuthenticator(object):
             return request
 
         except KeyError:
-            logger.debug(' * No KC token found, checking for an authorization code in args')
+            logger.debug(
+                ' * No KC token found, checking for an authorization code in args')
             token = await self.get_token_from_code(request)
             if token:
-                logger.debug(' * Authorization code found and exchanged for a token')
+                logger.debug(
+                    ' * Authorization code found and exchanged for a token')
                 request.ctx.token = token
                 return request
 
@@ -166,9 +178,11 @@ class KeycloakAuthenticator(object):
 
         try:
             logger.debug(' * Invalid or expired access token, attempting to refresh')
-            token = self.keycloak_client.refresh_token(request.ctx.token['refresh_token'])
+            token = self.keycloak_client.refresh_token(
+                request.ctx.token['refresh_token'])
+            introspected = self.keycloak_client.introspect(
+                request.ctx.token['access_token'])
 
-            introspected = self.keycloak_client.introspect(request.ctx.token['access_token'])
             if introspected['active']:
                 logger.debug(' * Access token refreshed')
                 request.ctx.token = token
@@ -191,13 +205,16 @@ class KeycloakAuthenticator(object):
         """ Redirect to the URL originally requested by the user, if it is different
             from self.redirect_url"""
 
-        logger.debug('> Ensure route used is the one originally requested (request)')
+        logger.debug(
+            '> Ensure route used is the one originally requested (request)')
 
         logger.debug(
-            ' * Checking whether a redirection to originally requested url is necessary')
+            ' * Check whether a redirect to originally requested url is needed')
         requested_url = request.cookies.get('requested_url')
-        if requested_url and request.url not in [requested_url, requested_url.rstrip('/')] :
-            await self.check_requested_url(requested_url)
+        redirect_needed = await self.check_requested_url(
+            requested_url, request.url)
+
+        if redirect_needed:
             logger.debug(f' * Redirection to {requested_url} necessary')
             response = await self.clear_cookies(
                 redirect(requested_url), 'requested_url')
@@ -205,7 +222,6 @@ class KeycloakAuthenticator(object):
             return response
         logger.debug(' * No redirection needed')
         return request
-
 
     async def set_keycloak_cookies(
             self,
@@ -227,18 +243,22 @@ class KeycloakAuthenticator(object):
             context_token = request.ctx.token
             assert 'access_token' in context_token
             assert 'refresh_token' in context_token
-        except:
+        except AttributeError:
             raise ServerError('No token found in request context')
+        except AssertionError:
+            raise ServerError('Token found in request context is invalid')
 
-        logger.debug(' * Checking if KC cookies exist: they will be set if they\'re absent or stale')
+        logger.debug(
+            ' * Check if KC cookies exist: they will be set if absent or stale')
         cookie_access_token = request.cookies.get('kc-access')
         cookie_refresh_token = request.cookies.get('kc-refresh')
 
-        if (not cookie_access_token
-            or not cookie_refresh_token
-            or cookie_access_token != context_token['access_token']
-            or cookie_refresh_token != context_token['refresh_token']):
-
+        try:
+            assert cookie_access_token
+            assert cookie_refresh_token
+            assert cookie_access_token == context_token['access_token']
+            assert cookie_refresh_token == context_token['refresh_token']
+        except AssertionError:
             logger.debug(' * Setting KC cookies')
             response = await self.set_cookies(
                 response,
@@ -248,7 +268,6 @@ class KeycloakAuthenticator(object):
                 }
             )
         return response
-
 
     async def check_roles(
             self,
