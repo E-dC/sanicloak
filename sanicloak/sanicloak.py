@@ -1,4 +1,4 @@
-from typing import List, Any, Dict, Tuple, Union, Set
+from typing import List, Any, Dict, Tuple, Union, Set, Optional
 from inspect import isawaitable
 from functools import wraps
 from urllib3.util import parse_url
@@ -17,11 +17,14 @@ class KeycloakAuthenticator(object):
     def __init__(
             self,
             app: sanic.Sanic,
+            redirect_url: str,
             keycloak_server_url: str,
             client_id: str,
             realm_name: str,
-            client_secret_key: str,
-            redirect_url: str):
+            client_secret_key: str = None,
+            verify: bool = True,
+            custom_headers: Optional[Dict[Any, Any]] = None,
+            proxies: Optional[Dict[Any, Any]] = None):
 
         self.steps_pre_handler = [
             self.retrieve_token,
@@ -34,7 +37,9 @@ class KeycloakAuthenticator(object):
             client_id=client_id,
             realm_name=realm_name,
             client_secret_key=client_secret_key,
-            verify=True
+            verify=verify,
+            custom_headers=custom_headers,
+            proxies=proxies
         )
 
         self.redirect_url = redirect_url
