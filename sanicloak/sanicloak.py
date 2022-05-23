@@ -42,6 +42,7 @@ class KeycloakAuthenticator(object):
             proxies=proxies
         )
 
+        self.client_id = client_id
         self.redirect_url = redirect_url
         self.keycloak_login_url = self.keycloak_client.auth_url(self.redirect_url)
         self.app = app
@@ -125,7 +126,10 @@ class KeycloakAuthenticator(object):
         x = parse_url(requested_url)
         base = f'{x.scheme}://{x.netloc}'
         try:
-            assert base == self.app.serve_location
+            logger.debug(f'base url is       {base}')
+            logger.debug(f'serve location is {self.app.serve_location}')
+
+            # assert base == self.app.serve_location
             assert x.path.lstrip('/') in [
                 r.path for r in self.app.router.routes
             ]
@@ -274,6 +278,27 @@ class KeycloakAuthenticator(object):
             )
         return response
 
+    def find_user_roles(
+        self,
+        identity_token: Dict[str, Any]
+    ) -> Set[str]:
+
+        user_roles = None
+        try:
+            user_roles = set(identity_token['roles'])
+        except KeyError:
+            try:
+                user_roles = (
+                    set(identity_token['resource_access'][self.client_id]['roles'])
+                )
+            except KeyError:
+                try:
+                    user_roles = set(identity_token['realm_access']['roles'])
+                except KeyError:
+                    pass
+
+        return user_roles
+
     async def check_roles(
             self,
             request: sanic.Request,
@@ -282,11 +307,11 @@ class KeycloakAuthenticator(object):
             the user's identity token
         """
 
-        try:
-            user_roles = set(request.ctx.identity_token['roles'])
-        except KeyError:
-            user_roles = set(request.ctx.identity_token['realm_access']['roles'])
+        user_roles = self.find_user_roles(request.ctx.identity_token)
+        if not user_roles:
+            raise Forbidden('Can\' find suitable role list.')
 
+        logger.debug(f'user roles: {user_roles}, roles: {roles}')
         if not user_roles.intersection(set(roles)):
             raise Forbidden('Restricted access')
 
